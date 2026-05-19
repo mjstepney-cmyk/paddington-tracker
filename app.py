@@ -484,7 +484,7 @@ if __name__ == "__main__":
     threading.Thread(target=td_connect, daemon=True).start()
     threading.Thread(target=darwin_poll, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)import os
+    app.run(host="0.0.0.0", port=port)
 import json
 import threading
 import time
