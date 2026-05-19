@@ -478,7 +478,10 @@ def berths():
         }
     return data
 
-
+@app.route("/smart")
+def smart_debug():
+    sample = {k: v for k, v in list(BERTH_MAP.items())[:20]}
+    return {"total": len(BERTH_MAP), "sample": sample, "error": state.get("smart_error", "none")}
 if __name__ == "__main__":
     threading.Thread(target=smart_refresh_loop, daemon=True).start()
     threading.Thread(target=td_connect, daemon=True).start()
