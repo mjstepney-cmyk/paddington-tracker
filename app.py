@@ -21,7 +21,7 @@ STOMP_PORT = 61618
 TD_TOPIC = "/topic/TD_ALL_SIG_AREA"
 DARWIN_URL = "https://lite.realtime.nationalrail.co.uk/OpenLDBWS/api/20220120"
 
-TARGET_DESTINATIONS = ["PGN", "NTA"]
+TARGET_DESTINATIONS = ["PGN", "NTA", "BRI"]
 FROM_CRS = "PAD"
 TD_AREA = "D3"  # Paddington TD area (NOT WY which is Euston/Camden)
 
