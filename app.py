@@ -14,8 +14,7 @@ app = Flask(__name__)
 # --- Config ---
 NR_USER = os.environ.get("NR_USER", "mjstepney@gmail.com")
 NR_PASS = os.environ.get("NR_PASS", "Hobbes01!")
-DARWIN_USER = os.environ.get("DARWIN_USER", "mjstepney@gmail.com")
-DARWIN_PASS = os.environ.get("DARWIN_PASS", "Hobbes01!")
+DARWIN_APIKEY = os.environ.get("DARWIN_APIKEY", "qgZNj5JTagKo1hKzcGpRhYgGImlSSsMiA1uHW5LKcOmgaRGH")
 
 STOMP_HOST = "publicdatafeeds.networkrail.co.uk"
 STOMP_PORT = 61618
@@ -200,33 +199,17 @@ def td_connect():
 
 
 # --- Darwin poller ---
+DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepartureBoard"
+
 def darwin_query():
     services = []
     for dest in TARGET_DESTINATIONS:
-        soap = f"""<?xml version="1.0" encoding="UTF-8"?>
-<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"
-  xmlns:ns1="http://thalesgroup.com/RTTI/2016-02-16/ldb/"
-  xmlns:ns2="http://thalesgroup.com/RTTI/2013-11-28/Token/types">
-  <SOAP-ENV:Header>
-    <ns2:AccessToken>
-      <ns2:TokenValue>{DARWIN_USER}:{DARWIN_PASS}</ns2:TokenValue>
-    </ns2:AccessToken>
-  </SOAP-ENV:Header>
-  <SOAP-ENV:Body>
-    <ns1:GetDepartureBoardRequest>
-      <ns1:numRows>5</ns1:numRows>
-      <ns1:crs>{FROM_CRS}</ns1:crs>
-      <ns1:filterCrs>{dest}</ns1:filterCrs>
-      <ns1:filterType>to</ns1:filterType>
-      <ns1:timeWindow>240</ns1:timeWindow>
-    </ns1:GetDepartureBoardRequest>
-  </SOAP-ENV:Body>
-</SOAP-ENV:Envelope>"""
         try:
-            r = requests.post(
-                DARWIN_URL,
-                data=soap,
-                headers={"Content-Type": "text/xml"},
+            url = f"{DARWIN_BASE}/{FROM_CRS}"
+            r = requests.get(
+                url,
+                headers={"x-apikey": DARWIN_APIKEY},
+                params={"filterCrs": dest, "filterType": "to", "numRows": 5, "timeWindow": 240},
                 timeout=10,
             )
             with state_lock:
