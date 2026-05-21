@@ -22,7 +22,7 @@ TD_TOPIC = "/topic/TD_ALL_SIG_AREA"
 DARWIN_URL = "https://lite.realtime.nationalrail.co.uk/OpenLDBWS/api/20220120"
 LONDON_TZ = ZoneInfo("Europe/London")
 
-TARGET_DESTINATIONS = ["PGN", "NTA", "PLY", "PNZ", "EXD", "BRI","CDF"]  # Paignton, Newton Abbot, Plymouth, Penzance
+TARGET_DESTINATIONS = ["PGN", "NTA", "PLY", "PNZ", "EXD", "BRI","CDF"]  # Paignton, Newton Abbot, Plymouth, Penzance, Exeter, Bristol, Cardiff
 FROM_CRS = "PAD"
 TD_AREA = "D3"
 
