@@ -27,12 +27,14 @@ FROM_CRS   = "PAD"
 DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepartureBoard"
 RTT_BASE    = "https://api.rtt.io/api/v1/json/search"
 
-# Westbound long-distance CRS allowlist (GWR + cross-country equivalents)
-# Excludes: Elizabeth line, Heathrow Express, local stoppers to Reading/Slough/etc
+# Verified GWR westbound destinations from Paddington only
 WESTBOUND_CRS = {
-    "PGN","NTA","PLY","PNZ","EXD","EXC","TAU","WSM","BRI","NWP",
-    "CDF","SWA","CNM","BPW","GMV","HFD","WOS","MEW","WSB","GCR",
-    "OXF","CHM","CBN","YVJ","PMH",
+    "PGN","NTA","PLY","PNZ",           # Devon/Cornwall
+    "EXD","EXC","TAU",                  # Exeter/Taunton
+    "BRI","NWP","WSM",                  # Bristol/Newport/Weston
+    "CDF","SWA",                        # Cardiff/Swansea
+    "OXF","CHM","CBN",                  # Oxford/Cheltenham/Chippenham
+    "BPW",                              # Bridgwater
 }
 LOCAL_CRS = {"RDG","SLO","MAI","TWY","IVR","HAY","HWV","THA","PAD"}
 EXCLUDE_OPERATORS = {"HX","XR","CC"}  # Heathrow Express, Elizabeth, CrossCountry local
@@ -165,28 +167,7 @@ def td_thread():
         time.sleep(15)
 
 
-# --- Darwin poller (single call, all westbound, 2hr window) ---
-def is_westbound(svc):
-    """Return True if this service is a long-distance westbound from PAD."""
-    op = svc.get("operator_code","") or svc.get("operatorCode","")
-    if op in EXCLUDE_OPERATORS:
-        return False
-    # Get the final destination CRS
-    dest_crs = ""
-    dest = svc.get("destination") or []
-    if isinstance(dest, list) and dest:
-        dest_crs = dest[0].get("crs","")
-    elif isinstance(dest, dict):
-        locs = dest.get("location",[])
-        if locs: dest_crs = locs[0].get("crs","")
-    if dest_crs in LOCAL_CRS:
-        return False
-    if dest_crs in WESTBOUND_CRS:
-        return True
-    # Unknown CRS — exclude to keep board clean
-    return False
-
-
+# --- Darwin poller ---
 def darwin_poll():
     while True:
         seen_headcodes = set()
@@ -256,11 +237,9 @@ def rtt_poll():
             svcs = []
             for s in (data.get("services") or []):
                 loc = s.get("locationDetail",{})
-                # Only departures (not terminating at PAD)
                 if loc.get("isCall") and not loc.get("isPublicDeparture"):
                     continue
-                origin_list = s.get("origin",[])
-                dest_list   = s.get("destination",[])
+                dest_list = s.get("destination",[])
                 if not dest_list:
                     continue
                 dest_crs  = dest_list[-1].get("crs","")
@@ -285,7 +264,6 @@ def rtt_poll():
                     "dest_crs": dest_crs,
                     "source":   "rtt",
                 })
-            # Sort by std
             svcs.sort(key=lambda x: x["std"])
             with lock:
                 state["rtt"] = svcs
@@ -294,12 +272,11 @@ def rtt_poll():
         except Exception as e:
             with lock: state["rtt_error"] = str(e)
             print(f"RTT error: {e}")
-        time.sleep(600)  # every 10 min
+        time.sleep(600)
 
 
 # --- Location resolution ---
 def resolve(headcode):
-    """Returns (location_str, is_platform, platform_num)"""
     berth = state["berths"].get(headcode)
     if not berth:
         return None, False, None
@@ -311,11 +288,6 @@ def resolve(headcode):
 
 # --- Build merged board ---
 def build_board():
-    """
-    Returns (darwin_rows, rtt_rows).
-    darwin_rows: next 2hr, enriched with TD.
-    rtt_rows: remaining services today, scheduled only (excluding ones already in darwin).
-    """
     now = now_london()
     darwin_hcs = set()
     darwin_rows = []
@@ -325,7 +297,6 @@ def build_board():
         darwin_hcs.add(hc)
         location, is_platform, plat_num = resolve(hc)
         platform = s["platform"] or (plat_num if is_platform else "")
-        # Status
         if platform:
             status = "green"
         elif is_platform:
@@ -334,7 +305,6 @@ def build_board():
             status = "amber"
         else:
             status = "grey"
-        # Delay label
         delay = ""
         if s["etd"] and s["etd"] not in ("On time",""):
             delay = s["etd"]
@@ -345,12 +315,10 @@ def build_board():
             "delay": delay,
         })
 
-    # RTT: exclude anything already in darwin, exclude past departures
     rtt_rows = []
     for s in state["rtt"]:
         if s["headcode"] in darwin_hcs:
             continue
-        # crude time compare — skip if std < now-5min
         try:
             h,m = s["std"].split(":")
             dep = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
@@ -377,17 +345,14 @@ HTML = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,sans-serif;
   max-width:520px;margin:0 auto;padding:0 0 3rem;}
-/* header */
 .hdr{display:flex;align-items:center;padding:1rem;border-bottom:1px solid var(--bdr);gap:.75rem;}
 .hdr-title{font-family:var(--mono);font-size:.75rem;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);}
 .hdr-time{font-family:var(--mono);font-size:.85rem;margin-left:auto;}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex-shrink:0;}
 .dot.off{background:var(--red);}
-/* section labels */
 .section-label{font-family:var(--mono);font-size:.65rem;letter-spacing:.15em;text-transform:uppercase;
   color:var(--dim);padding:.75rem 1rem .4rem;border-top:1px solid var(--bdr);margin-top:.5rem;}
 .section-label:first-of-type{border-top:none;margin-top:0;}
-/* board rows */
 .row{display:grid;grid-template-columns:52px 1fr auto;gap:0 .75rem;align-items:center;
   padding:.7rem 1rem;border-bottom:1px solid var(--bdr);cursor:default;}
 .row:hover{background:var(--s2);}
@@ -403,7 +368,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 .col-plat.amber{color:var(--amber);}
 .col-plat.grey{color:var(--grey);}
 .col-plat.sched{color:var(--grey);font-size:.7rem;padding-top:.3rem;}
-/* toggle */
 .toggle-row{display:flex;align-items:center;justify-content:space-between;
   padding:.6rem 1rem;cursor:pointer;user-select:none;}
 .toggle-row:hover{background:var(--s2);}
@@ -411,7 +375,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 .toggle-btn{font-family:var(--mono);font-size:.65rem;color:var(--dim);border:1px solid var(--bdr);
   border-radius:4px;padding:.15rem .4rem;background:none;}
 #rtt-section{display:none;}
-/* footer */
 .footer{font-family:var(--mono);font-size:.6rem;color:var(--grey);
   display:flex;justify-content:space-between;padding:.75rem 1rem;border-top:1px solid var(--bdr);margin-top:1rem;}
 .no-svcs{text-align:center;color:var(--dim);padding:2.5rem 1rem;font-size:.85rem;}
@@ -420,14 +383,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 <body>
 <div class="hdr">
   <div class="dot {{ 'ok' if td_connected else 'off' }}"></div>
-  <span class="hdr-title">London Paddington · Westbound</span>
+  <span class="hdr-title">London Paddington Â· Westbound</span>
   <span class="hdr-time">{{ now }}</span>
 </div>
 
 {% if not darwin_rows %}
 <div class="no-svcs">No westbound departures in the next 2 hours.</div>
 {% else %}
-<div class="section-label">Next 2 hours · live</div>
+<div class="section-label">Next 2 hours Â· live</div>
 {% for r in darwin_rows %}
 <div class="row">
   <div class="col-time">
@@ -443,7 +406,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
     </div>
   </div>
   <div class="col-plat {{ r.status }}">
-    {% if r.platform %}{{ r.platform }}{% elif r.status == 'amber' %}~{% else %}–{% endif %}
+    {% if r.platform %}{{ r.platform }}{% elif r.status == 'amber' %}~{% else %}â€“{% endif %}
   </div>
 </div>
 {% endfor %}
@@ -452,7 +415,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 {% if rtt_rows %}
 <div class="toggle-row" onclick="toggleRTT()">
   <span class="toggle-label">Later today ({{ rtt_rows|length }} services)</span>
-  <button class="toggle-btn" id="toggle-btn">show ▾</button>
+  <button class="toggle-btn" id="toggle-btn">show â–¾</button>
 </div>
 <div id="rtt-section">
   {% for r in rtt_rows %}
@@ -468,14 +431,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 </div>
 {% elif not rtt_active %}
 <div class="toggle-row" style="cursor:default;">
-  <span class="toggle-label" style="color:var(--grey)">Later today · RTT not configured</span>
+  <span class="toggle-label" style="color:var(--grey)">Later today Â· RTT not configured</span>
 </div>
 {% endif %}
 
 <div class="footer">
-  <span>TD {{ 'live' if td_connected else 'OFFLINE' }}{% if last_td %} · {{ last_td }}{% endif %}</span>
+  <span>TD {{ 'live' if td_connected else 'OFFLINE' }}{% if last_td %} Â· {{ last_td }}{% endif %}</span>
   <span>Darwin {% if darwin_error %}<span style="color:var(--red)">ERR</span>{% else %}{{ last_darwin }}{% endif %}</span>
-  <span>RTT {% if rtt_active %}{{ last_rtt or '…' }}{% else %}off{% endif %}</span>
+  <span>RTT {% if rtt_active %}{{ last_rtt or 'â€¦' }}{% else %}off{% endif %}</span>
 </div>
 
 <script>
@@ -484,9 +447,8 @@ function toggleRTT(){
   const b=document.getElementById('toggle-btn');
   const vis=s.style.display==='block';
   s.style.display=vis?'none':'block';
-  b.textContent=vis?'show ▾':'hide ▴';
+  b.textContent=vis?'show â–¾':'hide â–´';
 }
-// Auto-refresh every 20s
 setTimeout(()=>location.reload(), 20000);
 </script>
 </body>
