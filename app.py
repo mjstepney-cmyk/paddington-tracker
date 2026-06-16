@@ -174,43 +174,56 @@ def td_thread():
 # Returns JSON with "trainServices" list (same Darwin schema)
 def darwin_poll():
     while True:
-        seen_headcodes = set()
         svcs = []
         error = ""
-        for dest_crs in WESTBOUND_CRS:
-            try:
-                url = f"{HUXLEY_BASE}/departures/{FROM_CRS}/to/{dest_crs}/5/120"
-                r = requests.get(
-                    url,
-                    params={"accessToken": HUXLEY_TOKEN},
-                    timeout=10,
-                )
-                r.raise_for_status()
-                data = r.json()
-                raw = data.get("trainServices") or []
-                for s in raw:
-                    hc = s.get("trainid","") or s.get("serviceIdUrlSafe","")
-                    if hc in seen_headcodes:
-                        continue
-                    seen_headcodes.add(hc)
-                    dest_list = s.get("destination") or []
-                    dest_name = dest_list[0].get("locationName","?") if dest_list else dest_crs
-                    op_code = s.get("operatorCode","")
-                    if op_code in EXCLUDE_OPERATORS:
-                        continue
-                    svcs.append({
-                        "std":      s.get("std",""),
-                        "etd":      s.get("etd",""),
-                        "platform": s.get("platform","") or "",
-                        "headcode": hc,
-                        "operator": s.get("operator",""),
-                        "dest":     dest_name,
-                        "dest_crs": dest_crs,
-                        "source":   "darwin",
-                    })
-            except Exception as e:
-                error = str(e)
-                print(f"Darwin/Huxley2 error ({dest_crs}): {e}")
+        try:
+            # Single call: full PAD departure board with calling points, 120-min window
+            url = f"{HUXLEY_BASE}/departures/{FROM_CRS}/50"
+            r = requests.get(url, params={"accessToken": HUXLEY_TOKEN,
+                                          "expand": "true", "timeWindow": 120},
+                             timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            raw = data.get("trainServices") or []
+            for s in raw:
+                op_code = s.get("operatorCode","")
+                if op_code in EXCLUDE_OPERATORS:
+                    continue
+
+                dest_list = s.get("destination") or []
+                dest_crs  = dest_list[0].get("crs","") if dest_list else ""
+                dest_name = dest_list[0].get("locationName","?") if dest_list else "?"
+
+                # Collect this service's calling-point CRS codes
+                call_crs = set()
+                for cpl in (s.get("subsequentCallingPoints") or []):
+                    for cp in (cpl.get("callingPoint") or []):
+                        c = cp.get("crs")
+                        if c:
+                            call_crs.add(c)
+
+                # Keep if final destination OR any calling point is a westbound target
+                if dest_crs in WESTBOUND_CRS or (call_crs & WESTBOUND_CRS):
+                    pass
+                elif dest_crs in LOCAL_CRS:
+                    continue
+                else:
+                    continue
+
+                hc = s.get("trainid","") or s.get("serviceIdUrlSafe","")
+                svcs.append({
+                    "std":      s.get("std",""),
+                    "etd":      s.get("etd",""),
+                    "platform": s.get("platform","") or "",
+                    "headcode": hc,
+                    "operator": s.get("operator",""),
+                    "dest":     dest_name,
+                    "dest_crs": dest_crs,
+                    "source":   "darwin",
+                })
+        except Exception as e:
+            error = str(e)
+            print(f"Darwin/Huxley2 error: {e}")
         svcs.sort(key=lambda x: x["std"])
         with lock:
             state["darwin"] = svcs
