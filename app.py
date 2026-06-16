@@ -13,6 +13,7 @@ app = Flask(__name__)
 # --- Config ---
 NR_USER   = os.environ.get("NR_USER",      "mjstepney@gmail.com")
 NR_PASS   = os.environ.get("NR_PASS",      "Hobbes01!")
+DARWIN_KEY= os.environ.get("DARWIN_APIKEY","qgZNj5JTagKo1hKzcGpRhYgGImlSSsMiA1uHW5LKcOmgaRGH")
 RTT_USER  = os.environ.get("RTT_USER",     "")
 RTT_PASS  = os.environ.get("RTT_PASS",     "")
 
@@ -23,11 +24,11 @@ TD_AREA    = "D3"
 LONDON_TZ  = ZoneInfo("Europe/London")
 FROM_CRS   = "PAD"
 
-# Huxley2 — free Darwin proxy, no IP restrictions
-HUXLEY_BASE  = "https://huxley2.azurewebsites.net"
-HUXLEY_TOKEN = "DA1C7740-3DA6-4215-BFBB-DC5B5E804DB2"
+DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepBoardWithDetails"
+RTT_BASE    = "https://api.rtt.io/api/v1/json/search"
 
-RTT_BASE = "https://api.rtt.io/api/v1/json/search"
+# Browser-like User-Agent — RDM's gateway 403s bare python-requests UA
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 # Verified GWR westbound destinations from Paddington
 WESTBOUND_CRS = {
@@ -169,20 +170,21 @@ def td_thread():
         time.sleep(15)
 
 
-# --- Darwin poller via Huxley2 ---
-# Huxley2 endpoint: /departures/{from}/to/{to}/{rows}?accessToken=...
-# Returns JSON with "trainServices" list (same Darwin schema)
+# --- Darwin poller via RDM LDBWS (GetDepBoardWithDetails) ---
+# Single call returns full PAD board WITH calling points, so we filter in code.
+# Browser User-Agent avoids the gateway 403 that bare python-requests triggers.
 def darwin_poll():
     while True:
         svcs = []
         error = ""
         try:
-            # Single call: full PAD departure board with calling points, 120-min window
-            url = f"{HUXLEY_BASE}/departures/{FROM_CRS}"
-            r = requests.get(url, params={"accessToken": HUXLEY_TOKEN,
-                                          "expand": "true", "numRows": 50,
-                                          "timeWindow": 120},
-                             timeout=15)
+            url = f"{DARWIN_BASE}/{FROM_CRS}"
+            r = requests.get(
+                url,
+                headers={"x-apikey": DARWIN_KEY, "User-Agent": BROWSER_UA},
+                params={"numRows": 50, "timeWindow": 120},
+                timeout=15,
+            )
             r.raise_for_status()
             data = r.json()
             raw = data.get("trainServices") or []
@@ -211,7 +213,7 @@ def darwin_poll():
                 else:
                     continue
 
-                hc = s.get("trainid","") or s.get("serviceIdUrlSafe","")
+                hc = s.get("trainid","") or s.get("serviceID","")
                 svcs.append({
                     "std":      s.get("std",""),
                     "etd":      s.get("etd",""),
@@ -224,7 +226,7 @@ def darwin_poll():
                 })
         except Exception as e:
             error = str(e)
-            print(f"Darwin/Huxley2 error: {e}")
+            print(f"Darwin error: {e}")
         svcs.sort(key=lambda x: x["std"])
         with lock:
             state["darwin"] = svcs
