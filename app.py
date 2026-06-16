@@ -178,9 +178,10 @@ def darwin_poll():
         error = ""
         try:
             # Single call: full PAD departure board with calling points, 120-min window
-            url = f"{HUXLEY_BASE}/departures/{FROM_CRS}/50"
+            url = f"{HUXLEY_BASE}/departures/{FROM_CRS}"
             r = requests.get(url, params={"accessToken": HUXLEY_TOKEN,
-                                          "expand": "true", "timeWindow": 120},
+                                          "expand": "true", "numRows": 50,
+                                          "timeWindow": 120},
                              timeout=15)
             r.raise_for_status()
             data = r.json()
