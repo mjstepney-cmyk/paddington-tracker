@@ -13,7 +13,6 @@ app = Flask(__name__)
 # --- Config ---
 NR_USER   = os.environ.get("NR_USER",      "mjstepney@gmail.com")
 NR_PASS   = os.environ.get("NR_PASS",      "Hobbes01!")
-DARWIN_KEY= os.environ.get("DARWIN_APIKEY","qgZNj5JTagKo1hKzcGpRhYgGImlSSsMiA1uHW5LKcOmgaRGH")
 RTT_USER  = os.environ.get("RTT_USER",     "")
 RTT_PASS  = os.environ.get("RTT_PASS",     "")
 
@@ -24,10 +23,13 @@ TD_AREA    = "D3"
 LONDON_TZ  = ZoneInfo("Europe/London")
 FROM_CRS   = "PAD"
 
-DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepartureBoard"
-RTT_BASE    = "https://api.rtt.io/api/v1/json/search"
+# Huxley2 — free Darwin proxy, no IP restrictions
+HUXLEY_BASE  = "https://huxley2.azurewebsites.net"
+HUXLEY_TOKEN = "DA1C7740-3DA6-4215-BFBB-DC5B5E804DB2"
 
-# Verified GWR westbound destinations from Paddington only
+RTT_BASE = "https://api.rtt.io/api/v1/json/search"
+
+# Verified GWR westbound destinations from Paddington
 WESTBOUND_CRS = {
     "PGN","NTA","PLY","PNZ",           # Devon/Cornwall
     "EXD","EXC","TAU",                  # Exeter/Taunton
@@ -37,7 +39,7 @@ WESTBOUND_CRS = {
     "BPW",                              # Bridgwater
 }
 LOCAL_CRS = {"RDG","SLO","MAI","TWY","IVR","HAY","HWV","THA","PAD"}
-EXCLUDE_OPERATORS = {"HX","XR","CC"}  # Heathrow Express, Elizabeth, CrossCountry local
+EXCLUDE_OPERATORS = {"HX","XR","CC"}
 
 # --- Berth map (D3 area - Paddington + approaches) ---
 BERTH_MAP = {
@@ -87,10 +89,10 @@ BERTH_MAP = {
 
 # --- Shared state ---
 state = {
-    "berths": {},         # headcode -> berth_id
-    "raw_berths": {},     # berth_id -> headcode
-    "darwin": [],         # next 2hr departures (live)
-    "rtt": [],            # full-day schedule
+    "berths": {},
+    "raw_berths": {},
+    "darwin": [],
+    "rtt": [],
     "last_td": None,
     "last_darwin": None,
     "last_rtt": None,
@@ -167,7 +169,9 @@ def td_thread():
         time.sleep(15)
 
 
-# --- Darwin poller ---
+# --- Darwin poller via Huxley2 ---
+# Huxley2 endpoint: /departures/{from}/to/{to}/{rows}?accessToken=...
+# Returns JSON with "trainServices" list (same Darwin schema)
 def darwin_poll():
     while True:
         seen_headcodes = set()
@@ -175,32 +179,29 @@ def darwin_poll():
         error = ""
         for dest_crs in WESTBOUND_CRS:
             try:
+                url = f"{HUXLEY_BASE}/departures/{FROM_CRS}/to/{dest_crs}/5"
                 r = requests.get(
-                    f"{DARWIN_BASE}/{FROM_CRS}",
-                    headers={"x-apikey": DARWIN_KEY},
-                    params={"filterCrs": dest_crs, "filterType": "to",
-                            "numRows": 5, "timeWindow": 120},
+                    url,
+                    params={"accessToken": HUXLEY_TOKEN, "timeWindow": 120},
                     timeout=10,
                 )
                 r.raise_for_status()
                 data = r.json()
-                raw = (data.get("trainServices") or
-                       data.get("GetStationBoardResult",{}).get("trainServices",{}).get("service",[])
-                       or [])
+                raw = data.get("trainServices") or []
                 for s in raw:
-                    hc = s.get("trainid","") or s.get("uid","")
+                    hc = s.get("trainid","") or s.get("serviceIdUrlSafe","")
                     if hc in seen_headcodes:
                         continue
                     seen_headcodes.add(hc)
                     dest_list = s.get("destination") or []
-                    if isinstance(dest_list, list) and dest_list:
-                        dest_name = dest_list[0].get("locationName","?")
-                    else:
-                        dest_name = dest_crs
+                    dest_name = dest_list[0].get("locationName","?") if dest_list else dest_crs
+                    op_code = s.get("operatorCode","")
+                    if op_code in EXCLUDE_OPERATORS:
+                        continue
                     svcs.append({
                         "std":      s.get("std",""),
                         "etd":      s.get("etd",""),
-                        "platform": s.get("platform",""),
+                        "platform": s.get("platform","") or "",
                         "headcode": hc,
                         "operator": s.get("operator",""),
                         "dest":     dest_name,
@@ -209,7 +210,7 @@ def darwin_poll():
                     })
             except Exception as e:
                 error = str(e)
-                print(f"Darwin error ({dest_crs}): {e}")
+                print(f"Darwin/Huxley2 error ({dest_crs}): {e}")
         svcs.sort(key=lambda x: x["std"])
         with lock:
             state["darwin"] = svcs
@@ -297,9 +298,7 @@ def build_board():
         darwin_hcs.add(hc)
         location, is_platform, plat_num = resolve(hc)
         platform = s["platform"] or (plat_num if is_platform else "")
-        if platform:
-            status = "green"
-        elif is_platform:
+        if platform or is_platform:
             status = "green"
         elif location:
             status = "amber"
@@ -339,7 +338,7 @@ HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Paddington Board</title>
 <style>
-:root{--bg:#09090f;--s1:#111118;--s2:#18181f;--bdr:#1f1f2e;
+:root{--bg:#09090f;--s2:#18181f;--bdr:#1f1f2e;
   --green:#00e676;--amber:#ffc107;--grey:#4a5568;--red:#ff5252;
   --text:#e2e8f0;--dim:#64748b;--mono:'Space Mono',monospace;}
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -352,9 +351,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 .dot.off{background:var(--red);}
 .section-label{font-family:var(--mono);font-size:.65rem;letter-spacing:.15em;text-transform:uppercase;
   color:var(--dim);padding:.75rem 1rem .4rem;border-top:1px solid var(--bdr);margin-top:.5rem;}
-.section-label:first-of-type{border-top:none;margin-top:0;}
 .row{display:grid;grid-template-columns:52px 1fr auto;gap:0 .75rem;align-items:center;
-  padding:.7rem 1rem;border-bottom:1px solid var(--bdr);cursor:default;}
+  padding:.7rem 1rem;border-bottom:1px solid var(--bdr);}
 .row:hover{background:var(--s2);}
 .col-time{font-family:var(--mono);font-size:1.2rem;font-weight:700;line-height:1;}
 .col-time .delay{font-size:.65rem;color:var(--amber);display:block;font-weight:400;}
@@ -383,14 +381,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 <body>
 <div class="hdr">
   <div class="dot {{ 'ok' if td_connected else 'off' }}"></div>
-  <span class="hdr-title">London Paddington Â· Westbound</span>
+  <span class="hdr-title">London Paddington · Westbound</span>
   <span class="hdr-time">{{ now }}</span>
 </div>
 
 {% if not darwin_rows %}
 <div class="no-svcs">No westbound departures in the next 2 hours.</div>
 {% else %}
-<div class="section-label">Next 2 hours Â· live</div>
+<div class="section-label">Next 2 hours · live</div>
 {% for r in darwin_rows %}
 <div class="row">
   <div class="col-time">
@@ -406,7 +404,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
     </div>
   </div>
   <div class="col-plat {{ r.status }}">
-    {% if r.platform %}{{ r.platform }}{% elif r.status == 'amber' %}~{% else %}â€“{% endif %}
+    {% if r.platform %}{{ r.platform }}{% elif r.status == 'amber' %}~{% else %}–{% endif %}
   </div>
 </div>
 {% endfor %}
@@ -415,7 +413,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 {% if rtt_rows %}
 <div class="toggle-row" onclick="toggleRTT()">
   <span class="toggle-label">Later today ({{ rtt_rows|length }} services)</span>
-  <button class="toggle-btn" id="toggle-btn">show â–¾</button>
+  <button class="toggle-btn" id="toggle-btn">show ▾</button>
 </div>
 <div id="rtt-section">
   {% for r in rtt_rows %}
@@ -431,14 +429,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 </div>
 {% elif not rtt_active %}
 <div class="toggle-row" style="cursor:default;">
-  <span class="toggle-label" style="color:var(--grey)">Later today Â· RTT not configured</span>
+  <span class="toggle-label" style="color:var(--grey)">Later today · RTT not configured</span>
 </div>
 {% endif %}
 
 <div class="footer">
-  <span>TD {{ 'live' if td_connected else 'OFFLINE' }}{% if last_td %} Â· {{ last_td }}{% endif %}</span>
+  <span>TD {{ 'live' if td_connected else 'OFFLINE' }}{% if last_td %} · {{ last_td }}{% endif %}</span>
   <span>Darwin {% if darwin_error %}<span style="color:var(--red)">ERR</span>{% else %}{{ last_darwin }}{% endif %}</span>
-  <span>RTT {% if rtt_active %}{{ last_rtt or 'â€¦' }}{% else %}off{% endif %}</span>
+  <span>RTT {% if rtt_active %}{{ last_rtt or '…' }}{% else %}off{% endif %}</span>
 </div>
 
 <script>
@@ -447,7 +445,7 @@ function toggleRTT(){
   const b=document.getElementById('toggle-btn');
   const vis=s.style.display==='block';
   s.style.display=vis?'none':'block';
-  b.textContent=vis?'show â–¾':'hide â–´';
+  b.textContent=vis?'show ▾':'hide ▴';
 }
 setTimeout(()=>location.reload(), 20000);
 </script>
@@ -511,4 +509,3 @@ if __name__ == "__main__":
     threading.Thread(target=rtt_poll,    daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-    
