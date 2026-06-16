@@ -32,7 +32,7 @@ RTT_BASE = "https://api.rtt.io/api/v1/json/search"
 # Verified GWR westbound destinations from Paddington
 WESTBOUND_CRS = {
     "PGN","NTA","PLY","PNZ",           # Devon/Cornwall
-    "EXD","EXC","TAU",                  # Exeter/Taunton
+    "EXD","TAU",                        # Exeter/Taunton
     "BRI","NWP","WSM",                  # Bristol/Newport/Weston
     "CDF","SWA",                        # Cardiff/Swansea
     "OXF","CHM","CBN",                  # Oxford/Cheltenham/Chippenham
@@ -179,10 +179,10 @@ def darwin_poll():
         error = ""
         for dest_crs in WESTBOUND_CRS:
             try:
-                url = f"{HUXLEY_BASE}/departures/{FROM_CRS}/to/{dest_crs}/5"
+                url = f"{HUXLEY_BASE}/departures/{FROM_CRS}/to/{dest_crs}/5/120"
                 r = requests.get(
                     url,
-                    params={"accessToken": HUXLEY_TOKEN, "timeWindow": 120},
+                    params={"accessToken": HUXLEY_TOKEN},
                     timeout=10,
                 )
                 r.raise_for_status()
@@ -215,7 +215,7 @@ def darwin_poll():
         with lock:
             state["darwin"] = svcs
             state["last_darwin"] = now_london()
-            state["darwin_error"] = error
+            state["darwin_error"] = error if not svcs else ""
         time.sleep(60)
 
 
