@@ -25,7 +25,8 @@ TD_AREA    = "D3"
 LONDON_TZ  = ZoneInfo("Europe/London")
 FROM_CRS   = "PAD"
 
-DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepartureBoard"
+DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepBoardWithDetails"
+BROWSER_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 RTT_BASE    = "https://api.rtt.io/api/v1/json/search"
 
 # Verified GWR westbound destinations from Paddington only
@@ -178,7 +179,7 @@ def darwin_poll():
             try:
                 r = requests.get(
                     f"{DARWIN_BASE}/{FROM_CRS}",
-                    headers={"x-apikey": DARWIN_KEY},
+                    headers={"x-apikey": DARWIN_KEY, "User-Agent": BROWSER_UA},
                     params={"filterCrs": dest_crs, "filterType": "to",
                             "numRows": 5, "timeWindow": 120},
                     timeout=10,
