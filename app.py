@@ -593,6 +593,26 @@ def env_debug():
     }
 
 
+@app.route("/rtt_info")
+def rtt_info():
+    """Check RTT token type and entitlements, and probe the correct base URL."""
+    results = {}
+    for base in [
+        "https://api-portal.rtt.io",
+        "https://api.rtt.io",
+    ]:
+        try:
+            r = requests.get(
+                f"{base}/api/info",
+                headers={"Authorization": f"Bearer {RTT_TOKEN}"},
+                timeout=10,
+            )
+            results[base+"/api/info"] = {"status": r.status_code, "body": r.text[:300]}
+        except Exception as e:
+            results[base+"/api/info"] = {"error": str(e)}
+    return results
+
+
 if __name__ == "__main__":
     threading.Thread(target=td_thread,   daemon=True).start()
     threading.Thread(target=darwin_poll, daemon=True).start()
