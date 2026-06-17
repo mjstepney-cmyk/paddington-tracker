@@ -9,6 +9,7 @@ from flask import Flask, render_template_string
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+
 app = Flask(__name__)
 
 # --- Config ---
