@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import threading
 import time
@@ -24,23 +25,20 @@ TD_AREA    = "D3"
 LONDON_TZ  = ZoneInfo("Europe/London")
 FROM_CRS   = "PAD"
 
-DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepBoardWithDetails"
+DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepartureBoard"
 RTT_BASE    = "https://api.rtt.io/api/v1/json/search"
 
-# Browser-like User-Agent — RDM's gateway 403s bare python-requests UA
-BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-
-# Verified GWR westbound destinations from Paddington
+# Verified GWR westbound destinations from Paddington only
 WESTBOUND_CRS = {
     "PGN","NTA","PLY","PNZ",           # Devon/Cornwall
-    "EXD","TAU",                        # Exeter/Taunton
+    "EXD","EXC","TAU",                  # Exeter/Taunton
     "BRI","NWP","WSM",                  # Bristol/Newport/Weston
     "CDF","SWA",                        # Cardiff/Swansea
     "OXF","CHM","CBN",                  # Oxford/Cheltenham/Chippenham
     "BPW",                              # Bridgwater
 }
 LOCAL_CRS = {"RDG","SLO","MAI","TWY","IVR","HAY","HWV","THA","PAD"}
-EXCLUDE_OPERATORS = {"HX","XR","CC"}
+EXCLUDE_OPERATORS = {"HX","XR","CC"}  # Heathrow Express, Elizabeth, CrossCountry local
 
 # --- Berth map (D3 area - Paddington + approaches) ---
 BERTH_MAP = {
@@ -90,10 +88,10 @@ BERTH_MAP = {
 
 # --- Shared state ---
 state = {
-    "berths": {},
-    "raw_berths": {},
-    "darwin": [],
-    "rtt": [],
+    "berths": {},         # headcode -> berth_id
+    "raw_berths": {},     # berth_id -> headcode
+    "darwin": [],         # next 2hr departures (live)
+    "rtt": [],            # full-day schedule
     "last_td": None,
     "last_darwin": None,
     "last_rtt": None,
@@ -170,68 +168,54 @@ def td_thread():
         time.sleep(15)
 
 
-# --- Darwin poller via RDM LDBWS (GetDepBoardWithDetails) ---
-# Single call returns full PAD board WITH calling points, so we filter in code.
-# Browser User-Agent avoids the gateway 403 that bare python-requests triggers.
+# --- Darwin poller ---
 def darwin_poll():
     while True:
+        seen_headcodes = set()
         svcs = []
         error = ""
-        try:
-            url = f"{DARWIN_BASE}/{FROM_CRS}"
-            r = requests.get(
-                url,
-                headers={"x-apikey": DARWIN_KEY, "User-Agent": BROWSER_UA},
-                params={"numRows": 50, "timeWindow": 120},
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-            raw = data.get("trainServices") or []
-            for s in raw:
-                op_code = s.get("operatorCode","")
-                if op_code in EXCLUDE_OPERATORS:
-                    continue
-
-                dest_list = s.get("destination") or []
-                dest_crs  = dest_list[0].get("crs","") if dest_list else ""
-                dest_name = dest_list[0].get("locationName","?") if dest_list else "?"
-
-                # Collect this service's calling-point CRS codes
-                call_crs = set()
-                for cpl in (s.get("subsequentCallingPoints") or []):
-                    for cp in (cpl.get("callingPoint") or []):
-                        c = cp.get("crs")
-                        if c:
-                            call_crs.add(c)
-
-                # Keep if final destination OR any calling point is a westbound target
-                if dest_crs in WESTBOUND_CRS or (call_crs & WESTBOUND_CRS):
-                    pass
-                elif dest_crs in LOCAL_CRS:
-                    continue
-                else:
-                    continue
-
-                hc = s.get("trainid","") or s.get("serviceID","")
-                svcs.append({
-                    "std":      s.get("std",""),
-                    "etd":      s.get("etd",""),
-                    "platform": s.get("platform","") or "",
-                    "headcode": hc,
-                    "operator": s.get("operator",""),
-                    "dest":     dest_name,
-                    "dest_crs": dest_crs,
-                    "source":   "darwin",
-                })
-        except Exception as e:
-            error = str(e)
-            print(f"Darwin error: {e}")
+        for dest_crs in WESTBOUND_CRS:
+            try:
+                r = requests.get(
+                    f"{DARWIN_BASE}/{FROM_CRS}",
+                    headers={"x-apikey": DARWIN_KEY},
+                    params={"filterCrs": dest_crs, "filterType": "to",
+                            "numRows": 5, "timeWindow": 120},
+                    timeout=10,
+                )
+                r.raise_for_status()
+                data = r.json()
+                raw = (data.get("trainServices") or
+                       data.get("GetStationBoardResult",{}).get("trainServices",{}).get("service",[])
+                       or [])
+                for s in raw:
+                    hc = s.get("trainid","") or s.get("uid","")
+                    if hc in seen_headcodes:
+                        continue
+                    seen_headcodes.add(hc)
+                    dest_list = s.get("destination") or []
+                    if isinstance(dest_list, list) and dest_list:
+                        dest_name = dest_list[0].get("locationName","?")
+                    else:
+                        dest_name = dest_crs
+                    svcs.append({
+                        "std":      s.get("std",""),
+                        "etd":      s.get("etd",""),
+                        "platform": s.get("platform",""),
+                        "headcode": hc,
+                        "operator": s.get("operator",""),
+                        "dest":     dest_name,
+                        "dest_crs": dest_crs,
+                        "source":   "darwin",
+                    })
+            except Exception as e:
+                error = str(e)
+                print(f"Darwin error ({dest_crs}): {e}")
         svcs.sort(key=lambda x: x["std"])
         with lock:
             state["darwin"] = svcs
             state["last_darwin"] = now_london()
-            state["darwin_error"] = error if not svcs else ""
+            state["darwin_error"] = error
         time.sleep(60)
 
 
@@ -303,6 +287,27 @@ def resolve(headcode):
     return f"Berth {berth}", False, None
 
 
+HEADCODE_RE = re.compile(r'^\d[A-Z]\d{2}$')
+
+
+def is_headcode(x):
+    return bool(x and HEADCODE_RE.match(x))
+
+
+def rtt_headcode(std, dest_crs):
+    """Recover the 4-char signalling headcode for a Darwin service by matching
+    it against the RTT schedule (RTT 'trainIdentity'). Darwin/LDBWS does not
+    expose the headcode, so this join is the only source. Returns None until
+    RTT is configured. Match on std+dest_crs, fall back to std alone."""
+    cand = None
+    for s in state["rtt"]:
+        if s["std"] == std and is_headcode(s["headcode"]):
+            if s["dest_crs"] == dest_crs:
+                return s["headcode"]
+            cand = cand or s["headcode"]
+    return cand
+
+
 # --- Build merged board ---
 def build_board():
     now = now_london()
@@ -311,23 +316,29 @@ def build_board():
 
     for s in state["darwin"]:
         hc = s["headcode"]
+        if not is_headcode(hc):
+            hc = rtt_headcode(s["std"], s["dest_crs"]) or hc
         darwin_hcs.add(hc)
         location, is_platform, plat_num = resolve(hc)
-        platform = s["platform"] or (plat_num if is_platform else "")
-        if platform or is_platform:
-            status = "green"
-        elif location:
-            status = "amber"
-        else:
-            status = "grey"
+        darwin_plat = s["platform"]
+        if darwin_plat:                    # officially announced by Darwin
+            platform, status, conf, siding = darwin_plat, "green", "confirmed", ""
+        elif is_platform and plat_num:     # TD: unit already in a platform berth
+            platform, status, conf, siding = plat_num, "amber", "predicted", ""
+        elif location:                     # TD: unit located in sidings/approach
+            platform, status, conf, siding = "", "grey", "sidings", location
+        else:                              # not located on TD at all
+            platform, status, conf, siding = "", "grey", "none", ""
         delay = ""
         if s["etd"] and s["etd"] not in ("On time",""):
             delay = s["etd"]
         darwin_rows.append({**s,
+            "headcode": hc if is_headcode(hc) else "",
             "platform": platform,
-            "siding": location if not is_platform else "",
-            "status": status,
-            "delay": delay,
+            "siding":   siding,
+            "status":   status,
+            "conf":     conf,
+            "delay":    delay,
         })
 
     rtt_rows = []
@@ -354,7 +365,7 @@ HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Paddington Board</title>
 <style>
-:root{--bg:#09090f;--s2:#18181f;--bdr:#1f1f2e;
+:root{--bg:#09090f;--s1:#111118;--s2:#18181f;--bdr:#1f1f2e;
   --green:#00e676;--amber:#ffc107;--grey:#4a5568;--red:#ff5252;
   --text:#e2e8f0;--dim:#64748b;--mono:'Space Mono',monospace;}
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -367,8 +378,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 .dot.off{background:var(--red);}
 .section-label{font-family:var(--mono);font-size:.65rem;letter-spacing:.15em;text-transform:uppercase;
   color:var(--dim);padding:.75rem 1rem .4rem;border-top:1px solid var(--bdr);margin-top:.5rem;}
-.row{display:grid;grid-template-columns:52px 1fr auto;gap:0 .75rem;align-items:center;
-  padding:.7rem 1rem;border-bottom:1px solid var(--bdr);}
+.section-label:first-of-type{border-top:none;margin-top:0;}
+.row{display:grid;grid-template-columns:52px 1fr auto 26px;gap:0 .6rem;align-items:center;
+  padding:.7rem 1rem;border-bottom:1px solid var(--bdr);cursor:default;}
 .row:hover{background:var(--s2);}
 .col-time{font-family:var(--mono);font-size:1.2rem;font-weight:700;line-height:1;}
 .col-time .delay{font-size:.65rem;color:var(--amber);display:block;font-weight:400;}
@@ -392,6 +404,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 .footer{font-family:var(--mono);font-size:.6rem;color:var(--grey);
   display:flex;justify-content:space-between;padding:.75rem 1rem;border-top:1px solid var(--bdr);margin-top:1rem;}
 .no-svcs{text-align:center;color:var(--dim);padding:2.5rem 1rem;font-size:.85rem;}
+.legend{display:flex;gap:.9rem;padding:.5rem 1rem;border-bottom:1px solid var(--bdr);
+  font-family:var(--mono);font-size:.6rem;color:var(--dim);}
+.legend span{display:flex;align-items:center;gap:.3rem;}
+.legend i{width:7px;height:7px;border-radius:50%;display:inline-block;}
+.refresh-btn{font-family:var(--mono);font-size:.95rem;background:none;border:1px solid var(--bdr);
+  color:var(--text);border-radius:5px;padding:.05rem .45rem;margin-left:.5rem;cursor:pointer;}
+.refresh-btn:active{background:var(--s2);}
+.pin{background:none;border:none;color:var(--grey);font-size:1rem;cursor:pointer;
+  padding:0;line-height:1;justify-self:end;}
+.pin.on{color:var(--amber);}
+#pinned-label{display:none;}
 </style>
 </head>
 <body>
@@ -399,14 +422,22 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
   <div class="dot {{ 'ok' if td_connected else 'off' }}"></div>
   <span class="hdr-title">London Paddington · Westbound</span>
   <span class="hdr-time">{{ now }}</span>
+  <button class="refresh-btn" onclick="location.reload()" title="Refresh now">⟳</button>
 </div>
+<div class="legend">
+  <span><i style="background:var(--green)"></i>confirmed</span>
+  <span><i style="background:var(--amber)"></i>predicted</span>
+  <span><i style="background:var(--grey)"></i>sidings / —</span>
+</div>
+<div id="pinned-label" class="section-label">Pinned</div>
+<div id="pinned"></div>
 
 {% if not darwin_rows %}
 <div class="no-svcs">No westbound departures in the next 2 hours.</div>
 {% else %}
 <div class="section-label">Next 2 hours · live</div>
 {% for r in darwin_rows %}
-<div class="row">
+<div class="row" data-key="{{ r.std }}|{{ r.dest_crs }}">
   <div class="col-time">
     {{ r.std }}
     {% if r.delay %}<span class="delay">{{ r.delay }}</span>{% endif %}
@@ -414,14 +445,16 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
   <div class="col-dest">
     <div class="dest">{{ r.dest }}</div>
     <div class="sub">
-      <span>{{ r.headcode }}</span>
-      {% if r.siding %}<span class="loc-amber">{{ r.siding }}</span>
-      {% elif r.status == 'grey' %}<span class="loc-grey">not located</span>{% endif %}
+      {% if r.headcode %}<span>{{ r.headcode }}</span>{% endif %}
+      {% if r.conf == 'predicted' %}<span class="loc-amber">predicted · P{{ r.platform }}</span>
+      {% elif r.conf == 'sidings' %}<span class="loc-grey">{{ r.siding }}</span>
+      {% elif r.conf == 'none' %}<span class="loc-grey">not located</span>{% endif %}
     </div>
   </div>
   <div class="col-plat {{ r.status }}">
-    {% if r.platform %}{{ r.platform }}{% elif r.status == 'amber' %}~{% else %}–{% endif %}
+    {% if r.platform %}{{ r.platform }}{% else %}–{% endif %}
   </div>
+  <button class="pin" onclick="togglePin('{{ r.std }}|{{ r.dest_crs }}')">☆</button>
 </div>
 {% endfor %}
 {% endif %}
@@ -463,7 +496,39 @@ function toggleRTT(){
   s.style.display=vis?'none':'block';
   b.textContent=vis?'show ▾':'hide ▴';
 }
-setTimeout(()=>location.reload(), 20000);
+
+// --- Pin my train (localStorage-backed, survives reloads) ---
+function getPins(){try{return JSON.parse(localStorage.getItem('pad_pins')||'[]');}catch(e){return [];}}
+function togglePin(key){
+  let p=getPins();
+  p = p.includes(key) ? p.filter(k=>k!==key) : p.concat([key]);
+  localStorage.setItem('pad_pins',JSON.stringify(p));
+  location.reload();
+}
+function applyPins(){
+  const pins=getPins();
+  const pinned=document.getElementById('pinned');
+  const label=document.getElementById('pinned-label');
+  document.querySelectorAll('.row[data-key]').forEach(row=>{
+    const key=row.getAttribute('data-key');
+    const btn=row.querySelector('.pin');
+    if(pins.includes(key)){
+      if(btn){btn.textContent='★';btn.classList.add('on');}
+      pinned.appendChild(row);          // move pinned services to the top
+    }
+  });
+  label.style.display = pinned.children.length ? 'block' : 'none';
+}
+applyPins();
+
+// --- Adaptive refresh: 10s while focused, 60s when backgrounded ---
+let _rt=null;
+function scheduleReload(){
+  clearTimeout(_rt);
+  _rt=setTimeout(()=>location.reload(), document.hidden?60000:10000);
+}
+document.addEventListener('visibilitychange',scheduleReload);
+scheduleReload();
 </script>
 </body>
 </html>
