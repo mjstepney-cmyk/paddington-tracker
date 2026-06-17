@@ -595,21 +595,25 @@ def env_debug():
 
 @app.route("/rtt_info")
 def rtt_info():
-    """Check RTT token type and entitlements, and probe the correct base URL."""
+    """Probe RTT base URLs and paths to find the working endpoint."""
     results = {}
-    for base in [
-        "https://api-portal.rtt.io",
-        "https://api.rtt.io",
-    ]:
+    probes = [
+        "https://api-portal.rtt.io/api/v1/json/search/PAD",
+        "https://api-portal.rtt.io/api/v2/json/search/PAD",
+        "https://api-portal.rtt.io/v1/station/PAD",
+        "https://api-portal.rtt.io/api/station/PAD",
+        "https://api.rtt.io/api/v1/json/search/PAD",
+    ]
+    for url in probes:
         try:
             r = requests.get(
-                f"{base}/api/info",
+                url,
                 headers={"Authorization": f"Bearer {RTT_TOKEN}"},
-                timeout=10,
+                timeout=8,
             )
-            results[base+"/api/info"] = {"status": r.status_code, "body": r.text[:300]}
+            results[url] = r.status_code
         except Exception as e:
-            results[base+"/api/info"] = {"error": str(e)}
+            results[url] = str(e)
     return results
 
 
