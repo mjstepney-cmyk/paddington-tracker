@@ -9,15 +9,13 @@ from flask import Flask, render_template_string
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-
 app = Flask(__name__)
 
 # --- Config ---
 NR_USER   = os.environ.get("NR_USER",      "mjstepney@gmail.com")
 NR_PASS   = os.environ.get("NR_PASS",      "Hobbes01!")
 DARWIN_KEY= os.environ.get("DARWIN_APIKEY","qgZNj5JTagKo1hKzcGpRhYgGImlSSsMiA1uHW5LKcOmgaRGH")
-RTT_USER  = os.environ.get("RTT_USER",     "")
-RTT_PASS  = os.environ.get("RTT_PASS",     "")
+RTT_TOKEN = os.environ.get("RTT_TOKEN",    "")
 
 STOMP_HOST = "publicdatafeeds.networkrail.co.uk"
 STOMP_PORT = 61618
@@ -28,7 +26,7 @@ FROM_CRS   = "PAD"
 
 DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepBoardWithDetails"
 BROWSER_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-RTT_BASE    = "https://api.rtt.io/api/v1/json/search"
+RTT_BASE    = "https://api-portal.rtt.io/api/v1/json/search"
 
 # Verified GWR westbound destinations from Paddington only
 WESTBOUND_CRS = {
@@ -224,14 +222,14 @@ def darwin_poll():
 # --- RTT poller (full day, scheduled only) ---
 def rtt_poll():
     while True:
-        if not (RTT_USER and RTT_PASS):
+        if not RTT_TOKEN:
             time.sleep(60)
             continue
         try:
             today = now_london().strftime("%Y/%m/%d")
             r = requests.get(
                 f"{RTT_BASE}/{FROM_CRS}",
-                auth=(RTT_USER, RTT_PASS),
+                headers={"Authorization": f"Bearer {RTT_TOKEN}"},
                 params={"date": today},
                 timeout=20,
             )
@@ -545,7 +543,7 @@ def index():
         last_darwin  = fmt_time(state["last_darwin"])
         last_rtt     = fmt_time(state["last_rtt"])
         darwin_error = state["darwin_error"]
-        rtt_active   = bool(RTT_USER and RTT_PASS)
+        rtt_active   = bool(RTT_TOKEN)
         darwin_rows, rtt_rows = build_board()
 
     return render_template_string(HTML,
@@ -584,6 +582,15 @@ def rtt_debug():
 @app.route("/health")
 def health():
     return "ok", 200
+
+
+@app.route("/env_debug")
+def env_debug():
+    return {
+        "RTT_TOKEN_set": bool(RTT_TOKEN),
+        "RTT_TOKEN_len": len(RTT_TOKEN),
+        "RTT_TOKEN_prefix": RTT_TOKEN[:8] if RTT_TOKEN else "",
+    }
 
 
 if __name__ == "__main__":
