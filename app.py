@@ -468,9 +468,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
   font-family:var(--mono);font-size:.6rem;color:var(--dim);}
 .legend span{display:flex;align-items:center;gap:.3rem;}
 .legend i{width:7px;height:7px;border-radius:50%;display:inline-block;}
-.refresh-btn{font-family:var(--mono);font-size:.95rem;background:none;border:1px solid var(--bdr);
-  color:var(--text);border-radius:5px;padding:.05rem .45rem;margin-left:.5rem;cursor:pointer;}
-.refresh-btn:active{background:var(--s2);}
+.refresh-btn{font-family:var(--mono);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;
+  background:var(--s2);border:1px solid var(--bdr);color:var(--text);border-radius:6px;
+  padding:.45rem .7rem;margin-left:.5rem;cursor:pointer;display:flex;align-items:center;gap:.4rem;}
+.refresh-btn:active{transform:scale(.96);}
+.refresh-btn .ico{display:inline-block;font-size:.9rem;}
+.refresh-btn.spinning .ico{animation:spin .7s linear infinite;}
+.refresh-btn.done{border-color:var(--green);color:var(--green);}
+@keyframes spin{to{transform:rotate(360deg);}}
 .pin{background:none;border:none;color:var(--grey);font-size:1rem;cursor:pointer;
   padding:0;line-height:1;justify-self:end;}
 .pin.on{color:var(--amber);}
@@ -482,7 +487,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
   <div class="dot {{ 'ok' if td_connected else 'off' }}"></div>
   <span class="hdr-title">London Paddington · Westbound</span>
   <span class="hdr-time">{{ now }}</span>
-  <button class="refresh-btn" onclick="location.reload()" title="Refresh now">⟳</button>
+  <button class="refresh-btn" id="refresh-btn" onclick="doRefresh()" title="Refresh now"><span class="ico">⟳</span><span id="refresh-lbl">Refresh</span></button>
 </div>
 <div class="legend">
   <span><i style="background:var(--green)"></i>confirmed</span>
@@ -549,13 +554,25 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,
 </div>
 
 <script>
-function toggleRTT(){
+// --- "Later today" toggle: persist open/closed across reloads ---
+function setRTT(open){
   const s=document.getElementById('rtt-section');
   const b=document.getElementById('toggle-btn');
-  const vis=s.style.display==='block';
-  s.style.display=vis?'none':'block';
-  b.textContent=vis?'show ▾':'hide ▴';
+  if(!s) return;
+  s.style.display = open ? 'block' : 'none';
+  if(b) b.textContent = open ? 'hide ▴' : 'show ▾';
+  try{ localStorage.setItem('pad_rtt_open', open ? '1':'0'); }catch(e){}
 }
+function toggleRTT(){
+  const s=document.getElementById('rtt-section');
+  setRTT(!(s && s.style.display==='block'));
+}
+// restore previous toggle state on load
+(function(){
+  let open=false;
+  try{ open = localStorage.getItem('pad_rtt_open')==='1'; }catch(e){}
+  if(open) setRTT(true);
+})();
 
 // --- Pin my train (localStorage-backed, survives reloads) ---
 function getPins(){try{return JSON.parse(localStorage.getItem('pad_pins')||'[]');}catch(e){return [];}}
@@ -581,11 +598,25 @@ function applyPins(){
 }
 applyPins();
 
-// --- Adaptive refresh: 10s while focused, 60s when backgrounded ---
+// --- Manual refresh with visible feedback ---
+function doRefresh(){
+  const btn=document.getElementById('refresh-btn');
+  const lbl=document.getElementById('refresh-lbl');
+  if(btn){ btn.classList.add('spinning'); }
+  if(lbl){ lbl.textContent='Updating…'; }
+  // brief delay so the spinner is visible, then reload
+  setTimeout(()=>location.reload(), 350);
+}
+
+// --- Adaptive auto-refresh ---
+// Pauses while the "later today" list is open so it doesn't snap shut on you.
 let _rt=null;
 function scheduleReload(){
   clearTimeout(_rt);
-  _rt=setTimeout(()=>location.reload(), document.hidden?60000:10000);
+  const s=document.getElementById('rtt-section');
+  const rttOpen = s && s.style.display==='block';
+  if(rttOpen) return;                       // don't auto-reload while browsing the full list
+  _rt=setTimeout(()=>location.reload(), document.hidden?60000:15000);
 }
 document.addEventListener('visibilitychange',scheduleReload);
 scheduleReload();
