@@ -37,6 +37,15 @@ WESTBOUND_CRS = {
     "OXF","CHM","CBN",                  # Oxford/Cheltenham/Chippenham
     "BPW",                              # Bridgwater
 }
+# RTT new API exposes destinations as TIPLOC longCodes, not CRS.
+WESTBOUND_TIPLOC = {
+    "PAIGNTN","NEWTNAB","PLYMTH","PENZNCE",
+    "EXETERSD","EXETRSD","EXTRCEN","TAUNTON",
+    "BRSTLTM","NWPTSGL","WSTONSM","WSMARE",
+    "CRDFCEN","SWANSEA",
+    "OXFD","CHLTNHM","CHIPNHM",
+    "BRGWTR","BRDGWTR",
+}
 LOCAL_CRS = {"RDG","SLO","MAI","TWY","IVR","HAY","HWV","THA","PAD"}
 EXCLUDE_OPERATORS = {"HX","XR","CC"}  # Heathrow Express, Elizabeth, CrossCountry local
 
@@ -282,35 +291,38 @@ def rtt_poll():
             for s in (data.get("services") or []):
                 sm  = s.get("scheduleMetadata", {}) or {}
                 td  = s.get("temporalData", {}) or {}
-                dep = td.get("departure", {}) or {}
+                dep = td.get("departure")
+                if not dep:                       # arrivals into PAD have no departure
+                    continue
                 if td.get("scheduledCallType") == "OPERATIONAL_ONLY":
                     continue
                 dests = s.get("destination", []) or []
                 if not dests:
                     continue
-                dloc = (dests[-1].get("location", {}) or {})
-                dshort = (dloc.get("shortCodes") or [""])
-                dest_crs  = dshort[0] if dshort else ""
+                dloc   = (dests[-1].get("location", {}) or {})
+                dlong  = (dloc.get("longCodes") or [])
+                dest_tip = dlong[0] if dlong else ""
                 dest_name = dloc.get("description", "?")
                 op   = (sm.get("operator", {}) or {})
                 opc  = op.get("code", "")
                 if opc in EXCLUDE_OPERATORS:
                     continue
-                if dest_crs in LOCAL_CRS:
-                    continue
-                if dest_crs not in WESTBOUND_CRS:
+                if dest_tip not in WESTBOUND_TIPLOC:
                     continue
                 std = _hhmm(dep.get("scheduleAdvertised") or dep.get("scheduleInternal"))
                 if not std:
                     continue
+                lm   = s.get("locationMetadata", {}) or {}
+                pf   = lm.get("platform", {}) or {}
+                plat = pf.get("planned") or pf.get("actual") or pf.get("forecast") or ""
                 svcs.append({
                     "std":      std,
                     "etd":      "",
-                    "platform": "",
-                    "headcode": sm.get("trainReportingIdentity", ""),
+                    "platform": plat,
+                    "headcode": sm.get("trainReportingIdentity", "") or sm.get("identity", ""),
                     "operator": op.get("name", ""),
                     "dest":     dest_name,
-                    "dest_crs": dest_crs,
+                    "dest_crs": dest_tip,
                     "source":   "rtt",
                 })
             svcs.sort(key=lambda x: x["std"])
