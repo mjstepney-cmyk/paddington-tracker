@@ -26,7 +26,7 @@ FROM_CRS   = "PAD"
 
 DARWIN_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120/GetDepBoardWithDetails"
 BROWSER_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-RTT_BASE    = "https://api-portal.rtt.io/api/v1/json/search"
+RTT_BASE    = "https://data.rtt.io"
 
 # Verified GWR westbound destinations from Paddington only
 WESTBOUND_CRS = {
@@ -219,48 +219,96 @@ def darwin_poll():
         time.sleep(60)
 
 
-# --- RTT poller (full day, scheduled only) ---
+# --- RTT poller (full day, scheduled only) — new data.rtt.io API ---
+# Token held is a *refresh* token; exchange it for a short-life access token,
+# then query /rtt/location. Headcode comes natively from
+# scheduleMetadata.trainReportingIdentity (gb-nr namespace).
+_rtt_access = {"token": "", "until": None}
+
+
+def rtt_get_access_token():
+    """Exchange the refresh token for an access token; cache until expiry."""
+    now = now_london()
+    if _rtt_access["token"] and _rtt_access["until"] and now < _rtt_access["until"]:
+        return _rtt_access["token"]
+    r = requests.get(
+        f"{RTT_BASE}/api/get_access_token",
+        headers={"Authorization": f"Bearer {RTT_TOKEN}"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    d = r.json()
+    _rtt_access["token"] = d.get("token", "")
+    vu = d.get("validUntil", "")
+    try:
+        exp = datetime.fromisoformat(vu.replace("Z", "+00:00")).astimezone(LONDON_TZ)
+        _rtt_access["until"] = exp - timedelta(minutes=2)
+    except Exception:
+        _rtt_access["until"] = now + timedelta(minutes=30)
+    return _rtt_access["token"]
+
+
+def _hhmm(iso):
+    """Extract HH:MM (London) from an ISO datetime string."""
+    if not iso:
+        return ""
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(LONDON_TZ).strftime("%H:%M")
+    except Exception:
+        return ""
+
+
 def rtt_poll():
     while True:
         if not RTT_TOKEN:
             time.sleep(60)
             continue
         try:
-            today = now_london().strftime("%Y/%m/%d")
+            access = rtt_get_access_token()
+            now = now_london()
             r = requests.get(
-                f"{RTT_BASE}/{FROM_CRS}",
-                headers={"Authorization": f"Bearer {RTT_TOKEN}"},
-                params={"date": today},
-                timeout=20,
+                f"{RTT_BASE}/rtt/location",
+                headers={"Authorization": f"Bearer {access}"},
+                params={
+                    "code": f"gb-nr:{FROM_CRS}",
+                    "timeFrom": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "timeWindow": 720,   # 12 hours ahead
+                },
+                timeout=25,
             )
             r.raise_for_status()
             data = r.json()
             svcs = []
             for s in (data.get("services") or []):
-                loc = s.get("locationDetail",{})
-                if loc.get("isCall") and not loc.get("isPublicDeparture"):
+                sm  = s.get("scheduleMetadata", {}) or {}
+                td  = s.get("temporalData", {}) or {}
+                dep = td.get("departure", {}) or {}
+                if td.get("scheduledCallType") == "OPERATIONAL_ONLY":
                     continue
-                dest_list = s.get("destination",[])
-                if not dest_list:
+                dests = s.get("destination", []) or []
+                if not dests:
                     continue
-                dest_crs  = dest_list[-1].get("crs","")
-                dest_name = dest_list[-1].get("description","?")
-                op = s.get("atocCode","")
-                if op in EXCLUDE_OPERATORS:
+                dloc = (dests[-1].get("location", {}) or {})
+                dshort = (dloc.get("shortCodes") or [""])
+                dest_crs  = dshort[0] if dshort else ""
+                dest_name = dloc.get("description", "?")
+                op   = (sm.get("operator", {}) or {})
+                opc  = op.get("code", "")
+                if opc in EXCLUDE_OPERATORS:
                     continue
                 if dest_crs in LOCAL_CRS:
                     continue
                 if dest_crs not in WESTBOUND_CRS:
                     continue
-                std = loc.get("gbttBookedDeparture","") or loc.get("publicDeparture","")
-                if len(std) == 4:
-                    std = std[:2]+":"+std[2:]
+                std = _hhmm(dep.get("scheduleAdvertised") or dep.get("scheduleInternal"))
+                if not std:
+                    continue
                 svcs.append({
                     "std":      std,
                     "etd":      "",
                     "platform": "",
-                    "headcode": s.get("trainIdentity",""),
-                    "operator": s.get("atocName",""),
+                    "headcode": sm.get("trainReportingIdentity", ""),
+                    "operator": op.get("name", ""),
                     "dest":     dest_name,
                     "dest_crs": dest_crs,
                     "source":   "rtt",
@@ -595,26 +643,32 @@ def env_debug():
 
 @app.route("/rtt_info")
 def rtt_info():
-    """Probe RTT base URLs and paths to find the working endpoint."""
-    results = {}
-    probes = [
-        "https://api-portal.rtt.io/api/v1/json/search/PAD",
-        "https://api-portal.rtt.io/api/v2/json/search/PAD",
-        "https://api-portal.rtt.io/v1/station/PAD",
-        "https://api-portal.rtt.io/api/station/PAD",
-        "https://api.rtt.io/api/v1/json/search/PAD",
-    ]
-    for url in probes:
-        try:
-            r = requests.get(
-                url,
-                headers={"Authorization": f"Bearer {RTT_TOKEN}"},
-                timeout=8,
+    """Verify the full new-API flow: token exchange then a location query."""
+    out = {}
+    try:
+        r = requests.get(
+            f"{RTT_BASE}/api/get_access_token",
+            headers={"Authorization": f"Bearer {RTT_TOKEN}"},
+            timeout=15,
+        )
+        out["get_access_token_status"] = r.status_code
+        out["get_access_token_body"] = r.text[:400]
+        if r.status_code == 200:
+            access = r.json().get("token", "")
+            now = now_london()
+            r2 = requests.get(
+                f"{RTT_BASE}/rtt/location",
+                headers={"Authorization": f"Bearer {access}"},
+                params={"code": f"gb-nr:{FROM_CRS}",
+                        "timeFrom": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "timeWindow": 120},
+                timeout=20,
             )
-            results[url] = r.status_code
-        except Exception as e:
-            results[url] = str(e)
-    return results
+            out["location_status"] = r2.status_code
+            out["location_body"] = r2.text[:600]
+    except Exception as e:
+        out["error"] = str(e)
+    return out
 
 
 if __name__ == "__main__":
