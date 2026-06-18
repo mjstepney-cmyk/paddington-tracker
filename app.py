@@ -691,6 +691,47 @@ def rtt_raw():
         return {"error": str(e)}
 
 
+@app.route("/rtt_find/<hhmm>")
+def rtt_find(hhmm):
+    """Find the raw RTT service(s) departing at a given HH:MM, to debug filtering."""
+    try:
+        access = rtt_get_access_token()
+        now = now_london()
+        r = requests.get(
+            f"{RTT_BASE}/rtt/location",
+            headers={"Authorization": f"Bearer {access}"},
+            params={"code": f"gb-nr:{FROM_CRS}",
+                    "timeFrom": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "timeWindow": 720},
+            timeout=25,
+        )
+        data = r.json()
+        hits = []
+        for s in (data.get("services") or []):
+            td = s.get("temporalData", {}) or {}
+            dep = td.get("departure")
+            t = _hhmm((dep or {}).get("scheduleAdvertised") or (dep or {}).get("scheduleInternal")) if dep else ""
+            arr = td.get("arrival")
+            ta = _hhmm((arr or {}).get("scheduleAdvertised")) if arr else ""
+            if t == hhmm or ta == hhmm:
+                dests = s.get("destination", []) or []
+                dloc = (dests[-1].get("location", {}) or {}) if dests else {}
+                sm = s.get("scheduleMetadata", {}) or {}
+                hits.append({
+                    "dep": t, "arr": ta,
+                    "dest_name": dloc.get("description"),
+                    "dest_longCodes": dloc.get("longCodes"),
+                    "operator": (sm.get("operator", {}) or {}).get("code"),
+                    "identity": sm.get("identity"),
+                    "trainReportingIdentity": sm.get("trainReportingIdentity"),
+                    "scheduledCallType": td.get("scheduledCallType"),
+                    "has_departure": bool(dep),
+                })
+        return {"hhmm": hhmm, "matches": hits}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.route("/health")
 def health():
     return "ok", 200
