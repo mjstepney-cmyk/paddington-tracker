@@ -369,52 +369,79 @@ def rtt_headcode(std, dest_crs):
 
 
 # --- Build merged board ---
+def _mins_from_now(std, now):
+    """Minutes from now until an HH:MM today (handles just-past)."""
+    try:
+        h, m = std.split(":")
+        dep = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+        return (dep - now).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+def _decorate(s, now):
+    """Attach platform/status/confidence to a service dict (Darwin or RTT)."""
+    hc = s.get("headcode", "")
+    if not is_headcode(hc):
+        hc = rtt_headcode(s["std"], s["dest_crs"]) or hc
+    location, is_platform, plat_num = resolve(hc)
+    darwin_plat = s.get("platform", "") if s.get("source") == "darwin" else ""
+    if darwin_plat:                    # officially announced by Darwin
+        platform, status, conf, siding = darwin_plat, "green", "confirmed", ""
+    elif is_platform and plat_num:     # TD: unit already in a platform berth
+        platform, status, conf, siding = plat_num, "amber", "predicted", ""
+    elif location:                     # TD: unit located in sidings/approach
+        platform, status, conf, siding = "", "grey", "sidings", location
+    else:                              # not located on TD at all
+        platform, status, conf, siding = "", "grey", "none", ""
+    delay = ""
+    etd = s.get("etd", "")
+    if etd and etd not in ("On time", ""):
+        delay = etd
+    return {**s,
+        "headcode": hc if is_headcode(hc) else "",
+        "platform": platform,
+        "siding":   siding,
+        "status":   status,
+        "conf":     conf,
+        "delay":    delay,
+    }
+
+
 def build_board():
     now = now_london()
-    darwin_hcs = set()
-    darwin_rows = []
+    WINDOW_MIN = 120
 
-    for s in state["darwin"]:
-        hc = s["headcode"]
-        if not is_headcode(hc):
-            hc = rtt_headcode(s["std"], s["dest_crs"]) or hc
-        darwin_hcs.add(hc)
-        location, is_platform, plat_num = resolve(hc)
-        darwin_plat = s["platform"]
-        if darwin_plat:                    # officially announced by Darwin
-            platform, status, conf, siding = darwin_plat, "green", "confirmed", ""
-        elif is_platform and plat_num:     # TD: unit already in a platform berth
-            platform, status, conf, siding = plat_num, "amber", "predicted", ""
-        elif location:                     # TD: unit located in sidings/approach
-            platform, status, conf, siding = "", "grey", "sidings", location
-        else:                              # not located on TD at all
-            platform, status, conf, siding = "", "grey", "none", ""
-        delay = ""
-        if s["etd"] and s["etd"] not in ("On time",""):
-            delay = s["etd"]
-        darwin_rows.append({**s,
-            "headcode": hc if is_headcode(hc) else "",
-            "platform": platform,
-            "siding":   siding,
-            "status":   status,
-            "conf":     conf,
-            "delay":    delay,
-        })
-
-    rtt_rows = []
+    # Merge Darwin + RTT keyed by (std, destination name). Darwin wins on overlap
+    # because it carries live platform/etd; RTT fills the gaps Darwin misses.
+    merged = {}
     for s in state["rtt"]:
-        if s["headcode"] in darwin_hcs:
-            continue
-        try:
-            h,m = s["std"].split(":")
-            dep = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
-            if dep < now - timedelta(minutes=5):
-                continue
-        except Exception:
-            pass
-        rtt_rows.append(s)
+        key = (s["std"], s["dest"].lower())
+        merged[key] = s
+    for s in state["darwin"]:
+        key = (s["std"], s["dest"].lower())
+        if key in merged:
+            # overlay: keep Darwin platform/etd, but inherit RTT headcode if better
+            base = merged[key]
+            if not is_headcode(s.get("headcode", "")) and is_headcode(base.get("headcode", "")):
+                s = {**s, "headcode": base["headcode"]}
+        merged[key] = s
 
-    return darwin_rows, rtt_rows
+    live_rows, later_rows = [], []
+    for s in merged.values():
+        mins = _mins_from_now(s["std"], now)
+        if mins is None:
+            continue
+        if mins < -5:                       # already departed
+            continue
+        if mins <= WINDOW_MIN:
+            live_rows.append(_decorate(s, now))
+        else:
+            later_rows.append(s)
+
+    live_rows.sort(key=lambda x: x["std"])
+    later_rows.sort(key=lambda x: x["std"])
+    return live_rows, later_rows
 
 
 # --- HTML ---
