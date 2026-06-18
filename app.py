@@ -627,6 +627,27 @@ def rtt_debug():
                 "last": fmt_time(state["last_rtt"]), "total": len(state["rtt"])}
 
 
+@app.route("/rtt_raw")
+def rtt_raw():
+    """Dump the raw structure of the first 2 RTT services to fix field mapping."""
+    try:
+        access = rtt_get_access_token()
+        now = now_london()
+        r = requests.get(
+            f"{RTT_BASE}/rtt/location",
+            headers={"Authorization": f"Bearer {access}"},
+            params={"code": f"gb-nr:{FROM_CRS}",
+                    "timeFrom": now.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "timeWindow": 120},
+            timeout=20,
+        )
+        data = r.json()
+        svcs = data.get("services") or []
+        return {"count": len(svcs), "first_two": svcs[:2]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.route("/health")
 def health():
     return "ok", 200
